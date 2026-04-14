@@ -24,7 +24,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "2.0.0")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.1")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
