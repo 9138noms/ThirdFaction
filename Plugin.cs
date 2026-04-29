@@ -24,7 +24,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.2")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.3")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -555,20 +555,25 @@ public class Plugin : BaseUnityPlugin
     }
 
     // ==========================================================
-    //  Patch: FactionHQ.ServerSetup — skip for PMC.
-    //  Prevents DeployUnits, DistributeFunds, OnMissionLoad
-    //  from running on PMC HQ. These can corrupt Mirage's
-    //  spawn pipeline and cause phantom units on BDF/PALA.
+    //  Patch: FactionHQ.ServerSetup — observability only.
+    //  Earlier versions blocked ServerSetup on PMC because the old
+    //  cloned-HQ approach corrupted Mirage's spawn pipeline and
+    //  caused phantom units on BDF/PALA. With v2.0 sceneId + proper
+    //  ServerObjectManager.Spawn (v1.5.2), the PMC HQ is a normal
+    //  network object, so ServerSetup is safe and necessary — it
+    //  initializes aircraftThreatTracker (unblocks Patch_FactionHQ_Update),
+    //  runs OnMissionLoad (populates AIAircraftLimit, AircraftSupply,
+    //  VehicleSupply, restrictions), and schedules DeployUnits +
+    //  DistributeFunds. Without it, PMC has zero AI deploy.
     // ==========================================================
     [HarmonyPatch(typeof(FactionHQ), "ServerSetup")]
     static class Patch_ServerSetup
     {
-        [HarmonyPrefix]
-        static bool Prefix(FactionHQ __instance)
+        [HarmonyPostfix]
+        static void Postfix(FactionHQ __instance)
         {
-            if (__instance.faction != PmcFaction) return true;
-            Log.LogInfo("Skipped ServerSetup for PMC HQ");
-            return false;
+            if (__instance.faction != PmcFaction) return;
+            Log.LogInfo($"ServerSetup ran for PMC HQ (AIAircraftLimit={__instance.AIAircraftLimit}, supplies={__instance.AircraftSupply.Count + __instance.VehicleSupply.Count})");
         }
     }
 
