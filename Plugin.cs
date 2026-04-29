@@ -24,7 +24,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.3")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.4")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -105,8 +105,11 @@ public class Plugin : BaseUnityPlugin
         f.factionExtendedName = cfgFactionName.Value;
         f.color = ParseColor(cfgFactionColor.Value);
         f.selectedColor = Color.Lerp(f.color, Color.white, 0.3f);
+        // Faction has THREE sprite slots and different UI elements read
+        // different ones — leaving any null shows a gray placeholder.
         f.factionColorLogo = LoadOrGenerateLogo(f.color);
         f.factionHeaderSprite = f.factionColorLogo;
+        f.factionGrayscaleLogo = MakeGrayscaleVariant(f.factionColorLogo);
 
         AccessTools.Field(typeof(Faction), "convoyGroups")
             ?.SetValue(f, Activator.CreateInstance(
@@ -150,29 +153,74 @@ public class Plugin : BaseUnityPlugin
             catch { }
         }
 
+        // Procedural fallback: filled disc with darker outer ring and an
+        // 8-pointed star inset, so a user without a custom PNG still gets
+        // something that reads as a faction icon rather than a flat circle.
         int size = 128;
         var fallbackTex = new Texture2D(size, size, TextureFormat.RGBA32, false);
         float center = size / 2f;
-        float radius = center - 2f;
+        float outerR = center - 2f;
+        float ringR = outerR - 6f;
+        float starR = ringR - 4f;
+        Color ringColor = Color.Lerp(factionColor, Color.black, 0.55f);
+        Color starColor = Color.Lerp(factionColor, Color.white, 0.45f);
         for (int y = 0; y < size; y++)
         {
             for (int x = 0; x < size; x++)
             {
                 float dx = x - center, dy = y - center;
                 float dist = Mathf.Sqrt(dx * dx + dy * dy);
-                if (dist <= radius)
-                    fallbackTex.SetPixel(x, y, factionColor);
-                else if (dist <= radius + 1.5f)
-                    fallbackTex.SetPixel(x, y, Color.Lerp(factionColor, Color.clear, (dist - radius) / 1.5f));
-                else
-                    fallbackTex.SetPixel(x, y, Color.clear);
+                if (dist > outerR + 1.5f) { fallbackTex.SetPixel(x, y, Color.clear); continue; }
+                Color c;
+                if (dist > outerR) c = Color.Lerp(ringColor, Color.clear, (dist - outerR) / 1.5f);
+                else if (dist > ringR) c = ringColor;
+                else c = factionColor;
+
+                // 8-pointed star inside ringR: pointy when angle aligns to
+                // 0/45/90/... degrees, deflated when between. Compare against
+                // a star radius that varies with angle.
+                if (dist <= ringR)
+                {
+                    float angle = Mathf.Atan2(dy, dx);
+                    float petals = Mathf.Abs(Mathf.Cos(angle * 4f));
+                    float starAt = Mathf.Lerp(starR * 0.45f, starR, petals);
+                    if (dist <= starAt) c = starColor;
+                }
+                fallbackTex.SetPixel(x, y, c);
             }
         }
         fallbackTex.Apply();
-        Log.LogInfo("Generated fallback logo (colored circle)");
+        Log.LogInfo("Generated fallback logo (procedural star)");
         return Sprite.Create(fallbackTex,
             new Rect(0, 0, size, size),
             new Vector2(0.5f, 0.5f), 100f);
+    }
+
+    static Sprite MakeGrayscaleVariant(Sprite source)
+    {
+        if (source == null || source.texture == null) return source;
+        try
+        {
+            // Texture may not be readable (loaded via ImageConversion.LoadImage IS
+            // readable; user-supplied PNGs decoded via the same path are too).
+            var src = source.texture;
+            var dst = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false);
+            var px = src.GetPixels();
+            for (int i = 0; i < px.Length; i++)
+            {
+                float l = px[i].r * 0.299f + px[i].g * 0.587f + px[i].b * 0.114f;
+                px[i] = new Color(l, l, l, px[i].a);
+            }
+            dst.SetPixels(px);
+            dst.Apply();
+            return Sprite.Create(dst, new Rect(0, 0, dst.width, dst.height),
+                new Vector2(0.5f, 0.5f), 100f);
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"Grayscale variant failed, reusing color logo: {ex.Message}");
+            return source;
+        }
     }
 
     static Color ParseColor(string s)
