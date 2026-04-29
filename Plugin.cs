@@ -24,7 +24,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.1")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.2")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -32,6 +32,12 @@ public class Plugin : BaseUnityPlugin
     internal static FactionHQ PmcHQ;
     internal static HashSet<int> PmcUnitInstanceIds = new HashSet<int>();
     internal static HashSet<PersistentID> PmcUnitPersistentIds = new HashSet<PersistentID>();
+    // Cached so SetupPmcHQ can spawn HQs created AFTER SpawnSceneObjects ran.
+    // Without this, scene reloads / late HqFromName lookups produce a PMC HQ
+    // whose NetworkIdentity is never registered with the server, IsServer
+    // stays false, and any [Server]-guarded call (e.g. FactionHQ.AddAirbase
+    // when an airbase is captured for PMC) throws MethodInvocationException.
+    internal static ServerObjectManager _cachedSom;
 
     static ConfigEntry<bool> cfgEnabled;
     static ConfigEntry<string> cfgFactionName;
@@ -265,12 +271,38 @@ public class Plugin : BaseUnityPlugin
 
             PmcHQ = hq;
             Log.LogInfo($"PMC HQ created with sceneId={newSceneId} (parent: {target?.name ?? "none"}, factions={FactionRegistry.factions.Count})");
+
+            // Spawn immediately if SpawnSceneObjects has already run for this scene.
+            // The Patch_SpawnSceneObjects Postfix only fires once per scene load, so
+            // any HQ created later (HqFromName lookups during mission load, scene
+            // reloads) needs to be registered here or its NetworkIdentity stays
+            // unregistered and IsServer returns false.
+            TrySpawnPmcHQ();
+
             return hq;
         }
         catch (Exception ex)
         {
             Log.LogError($"SetupPmcHQ failed: {ex}");
             return null;
+        }
+    }
+
+    internal static void TrySpawnPmcHQ()
+    {
+        if (PmcHQ == null) return;
+        if (_cachedSom == null) return;
+        try
+        {
+            var nwid = PmcHQ.GetComponent<NetworkIdentity>();
+            if (nwid == null) return;
+            if (nwid.NetId != 0) return; // already spawned
+            _cachedSom.Spawn(nwid.gameObject);
+            Log.LogInfo($"PMC HQ spawned via cached SOM (NetId={nwid.NetId})");
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"PMC HQ spawn-on-creation failed (non-fatal): {ex.Message}");
         }
     }
 
@@ -385,25 +417,11 @@ public class Plugin : BaseUnityPlugin
         static void Postfix(ServerObjectManager __instance)
         {
             if (PmcFaction == null) return;
+            // Cache SOM so any PMC HQ created later (scene reload, late
+            // HqFromName lookup) can also be spawned via TrySpawnPmcHQ.
+            _cachedSom = __instance;
             SetupPmcHQ();
-
-            // Manually spawn the PMC HQ since SpawnSceneObjects already ran
-            if (PmcHQ != null)
-            {
-                try
-                {
-                    var nwid = PmcHQ.GetComponent<NetworkIdentity>();
-                    if (nwid != null)
-                    {
-                        __instance.Spawn(nwid.gameObject);
-                        Log.LogInfo($"PMC HQ manually spawned via ServerObjectManager (NetId={nwid.NetId})");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.LogWarning($"PMC HQ manual spawn failed (non-fatal): {ex.Message}");
-                }
-            }
+            TrySpawnPmcHQ();
         }
     }
 
