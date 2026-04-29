@@ -8,9 +8,11 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using Mirage;
+using NuclearOption.AddressableScripts;
 using NuclearOption.Networking;
 using NuclearOption.Networking.Lobbies;
 using NuclearOption.SavedMission;
+using Steamworks;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -24,7 +26,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.5.4")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.6.0")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -45,6 +47,8 @@ public class Plugin : BaseUnityPlugin
     static ConfigEntry<float> cfgStartingBalance;
     static ConfigEntry<string> cfgFactionColor;
     static ConfigEntry<string> cfgLogoPath;
+    static ConfigEntry<bool> cfgPreferWorkshopSkins;
+    static ConfigEntry<bool> cfgWorkshopOnly;
 
     void Awake()
     {
@@ -57,6 +61,10 @@ public class Plugin : BaseUnityPlugin
         cfgFactionColor = Config.Bind("General", "FactionColor", "0.2,0.8,0.2,1", "RGBA color (comma-separated floats)");
         cfgLogoPath = Config.Bind("General", "LogoPath", "",
             "Path to a PNG logo file for the faction (e.g. BepInEx/plugins/pmc_logo.png). Leave empty to auto-generate from faction color.");
+        cfgPreferWorkshopSkins = Config.Bind("Skins", "PreferWorkshopSkins", true,
+            "When PMC AI spawns aircraft, pick a random Steam Workshop livery (or AppData skin) instead of the default BDF/PALA-tagged one. Leaves the default if no compatible mod skin exists.");
+        cfgWorkshopOnly = Config.Bind("Skins", "WorkshopOnly", false,
+            "Only use Steam Workshop liveries for PMC, not local AppData skins. Ignored when PreferWorkshopSkins is false.");
 
         if (!cfgEnabled.Value) return;
 
@@ -662,7 +670,68 @@ public class Plugin : BaseUnityPlugin
                 if (map != null) map.AddIcon(unit.persistentID);
             }
             catch { }
+
+            // Replace the default BDF/PALA-tagged livery with a Workshop /
+            // AppData livery when one is available. Without this, PMC AI
+            // aircraft fall back to liveries[0] (a BDF skin) because no
+            // stock livery has faction == PmcFaction.
+            if (cfgPreferWorkshopSkins != null && cfgPreferWorkshopSkins.Value
+                && unit is Aircraft aircraft)
+            {
+                AssignWorkshopLivery(aircraft);
+            }
             return false;
+        }
+    }
+
+    static readonly System.Random _liveryRng = new System.Random();
+
+    internal static void AssignWorkshopLivery(Aircraft aircraft)
+    {
+        try
+        {
+            var def = aircraft != null ? aircraft.definition as AircraftDefinition : null;
+            if (def == null) return;
+
+            // Refresh the skin metadata cache the same way the game does.
+            if (!ModLoadCache.HasSkinMetaData)
+            {
+                ModLoadCache.SkinMetaData.Clear();
+                ModLoadCache.SkinMetaData.AddRange(ModFolders.AppDataSkins.ListMetaData());
+                ModLoadCache.SkinMetaData.AddRange(ModFolders.WorkshopSkins.ListMetaData());
+                ModLoadCache.HasSkinMetaData = true;
+            }
+
+            bool workshopOnly = cfgWorkshopOnly != null && cfgWorkshopOnly.Value;
+            var pool = new List<LiveryMetaData>();
+            foreach (var meta in ModLoadCache.SkinMetaData)
+            {
+                if (meta.Aircraft != def.unitName) continue;
+                bool isWorkshop = meta.Id != PublishedFileId_t.Invalid;
+                if (workshopOnly && !isWorkshop) continue;
+                // Faction-locked skins for OTHER factions don't fit PMC; only
+                // skins explicitly tagged with no faction / Neutral, or
+                // anything Workshop-tagged (we're permissive there since
+                // Workshop authors often leave faction blank).
+                if (!FactionHelper.EmptyOrNoFactionOrNeutral(meta.Faction) && !isWorkshop) continue;
+                pool.Add(meta);
+            }
+
+            if (pool.Count == 0)
+            {
+                // No mod skin matches — leave whatever default the game picked.
+                return;
+            }
+
+            var pick = pool[_liveryRng.Next(pool.Count)];
+            bool pickIsWorkshop = pick.Id != PublishedFileId_t.Invalid;
+            var key = new LiveryKey(pick, pickIsWorkshop);
+            aircraft.SetLiveryKey(key, true);
+            Log.LogInfo($"PMC livery: {def.unitName} → \"{pick.DisplayName}\" ({(pickIsWorkshop ? "workshop" : "appdata")})");
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"PMC livery assign failed for {aircraft?.name}: {ex.Message}");
         }
     }
 
