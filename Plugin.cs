@@ -26,7 +26,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.6.0")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.6.1")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -160,6 +160,36 @@ public class Plugin : BaseUnityPlugin
             }
             catch { }
         }
+
+        // Embedded default — bundled inside the DLL so NOMM updates can't reset
+        // it and users who never set up a sidecar PNG still get a real logo.
+        try
+        {
+            var asm = typeof(Plugin).Assembly;
+            var resName = asm.GetManifestResourceNames()
+                .FirstOrDefault(n => n.EndsWith("PMC.png", StringComparison.OrdinalIgnoreCase));
+            if (resName != null)
+            {
+                using (var s = asm.GetManifestResourceStream(resName))
+                {
+                    if (s != null)
+                    {
+                        var data = new byte[s.Length];
+                        s.Read(data, 0, data.Length);
+                        var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                        if (ImageConversion.LoadImage(tex, data))
+                        {
+                            var sprite = Sprite.Create(tex,
+                                new Rect(0, 0, tex.width, tex.height),
+                                new Vector2(0.5f, 0.5f), 100f);
+                            Log.LogInfo($"Loaded embedded default logo ({tex.width}x{tex.height})");
+                            return sprite;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { Log.LogWarning($"Embedded logo load failed, falling back to procedural: {ex.Message}"); }
 
         // Procedural fallback: filled disc with darker outer ring and an
         // 8-pointed star inset, so a user without a custom PNG still gets
