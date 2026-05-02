@@ -26,7 +26,7 @@ namespace ThirdFaction;
 //  natively. Eliminates ~15 patches from v1.
 // ==========================================================
 
-[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.6.1")]
+[BepInPlugin("com.noms.thirdfaction", "ThirdFaction", "1.6.2")]
 public class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log;
@@ -893,6 +893,18 @@ public class Plugin : BaseUnityPlugin
     [HarmonyPatch(typeof(Leaderboard), "OnEnable")]
     static class Patch_Leaderboard_OnEnable
     {
+        // Game hotfixes occasionally rename or remove this method. If the
+        // target isn't there at load time, return false so Harmony skips
+        // this class silently instead of throwing — without this, the
+        // exception aborts PatchAll() and EVERY later patch in the mod
+        // (SpawnSceneObjects, ServerSetup, AddAirbase, etc.) fails to apply,
+        // which manifests as "Is Running false" + missing PMC at mission
+        // start.
+        static bool Prepare()
+        {
+            return AccessTools.Method(typeof(Leaderboard), "OnEnable") != null;
+        }
+
         [HarmonyPrefix]
         static bool Prefix(Leaderboard __instance)
         {
