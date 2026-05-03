@@ -966,6 +966,16 @@ public class Plugin : BaseUnityPlugin
                 var newSlot = newDisplays.GetValue(newDisplays.Length - 1);
                 setupMethod.Invoke(newSlot, new object[] { PmcHQ, rightClick });
 
+                // Awake already called OnPlayersChanged → DisplayPlayers on the
+                // pre-existing BDF/PALA slots BEFORE our Postfix appended PMC,
+                // so the cloned PMC slot is still showing the source slot's
+                // baked-in titleText/factionFlag/factionScore (PALA's). Force
+                // DisplayPlayers on just this slot so it picks up PMC's faction
+                // strings + logo.
+                var displayPlayersMethod = displayType.GetMethod("DisplayPlayers",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                displayPlayersMethod?.Invoke(newSlot, null);
+
                 // Subscribe to PMC's onPlayerChangedFaction so the leaderboard
                 // refreshes when players join/leave PMC, matching what the
                 // original Awake does for BDF/PALA.
@@ -997,13 +1007,25 @@ public class Plugin : BaseUnityPlugin
         var newArr = Array.CreateInstance(displayType, targetCount);
         Array.Copy(existing, newArr, existing.Length);
 
-        var entriesField = displayType.GetField("entries", BindingFlags.NonPublic | BindingFlags.Instance);
-        var titleField = displayType.GetField("titleText", BindingFlags.NonPublic | BindingFlags.Instance);
-        var flagField = displayType.GetField("factionFlag", BindingFlags.NonPublic | BindingFlags.Instance);
-        var scoreField = displayType.GetField("factionScore", BindingFlags.NonPublic | BindingFlags.Instance);
-        var contentField = displayType.GetField("playerListContent", BindingFlags.NonPublic | BindingFlags.Instance);
-        var scrollField = displayType.GetField("scrollView", BindingFlags.NonPublic | BindingFlags.Instance);
-        var prefabField = displayType.GetField("playerEntryPrefab", BindingFlags.NonPublic | BindingFlags.Instance);
+        // Hotfix split `entries` → `allEntries` + `activeEntries` AND made
+        // some fields public (allEntries, activeEntries, scrollView). Search
+        // both visibilities so we don't break across versions.
+        const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var entriesField = displayType.GetField("entries", F);
+        var allEntriesField = displayType.GetField("allEntries", F);
+        var activeEntriesField = displayType.GetField("activeEntries", F);
+        var titleField = displayType.GetField("titleText", F);
+        var flagField = displayType.GetField("factionFlag", F);
+        var scoreField = displayType.GetField("factionScore", F);
+        var contentField = displayType.GetField("playerListContent", F);
+        var scrollField = displayType.GetField("scrollView", F);
+        var prefabField = displayType.GetField("playerEntryPrefab", F);
+
+        if (scrollField == null)
+        {
+            Log.LogError("LeaderboardFactionDisplay.scrollView not found — leaderboard layout changed");
+            return existing;
+        }
 
         var src = existing.GetValue(existing.Length - 1);
         var srcScroll = (RectTransform)scrollField.GetValue(src);
@@ -1017,8 +1039,17 @@ public class Plugin : BaseUnityPlugin
             var clonedRoot = clonedGo.GetComponent<RectTransform>();
 
             var disp = Activator.CreateInstance(displayType);
-            prefabField.SetValue(disp, prefabField.GetValue(src));
-            entriesField.SetValue(disp, Activator.CreateInstance(entriesField.FieldType));
+            if (prefabField != null)
+                prefabField.SetValue(disp, prefabField.GetValue(src));
+
+            // Setup() reads/AddRange's into these lists, so they must already
+            // exist as instances — not null — when Setup is invoked.
+            if (entriesField != null)
+                entriesField.SetValue(disp, Activator.CreateInstance(entriesField.FieldType));
+            if (allEntriesField != null)
+                allEntriesField.SetValue(disp, Activator.CreateInstance(allEntriesField.FieldType));
+            if (activeEntriesField != null)
+                activeEntriesField.SetValue(disp, Activator.CreateInstance(activeEntriesField.FieldType));
 
             MapField(src, disp, titleField, (RectTransform)srcRoot, clonedRoot);
             MapField(src, disp, flagField, (RectTransform)srcRoot, clonedRoot);
