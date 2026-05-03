@@ -890,87 +890,98 @@ public class Plugin : BaseUnityPlugin
     // ==========================================================
     //  Patch: Leaderboard.OnEnable — expand for PMC
     // ==========================================================
-    [HarmonyPatch(typeof(Leaderboard), "OnEnable")]
-    static class Patch_Leaderboard_OnEnable
+    // The hotfix moved this work from OnEnable into Awake and renamed
+    // LeaderboardFactionDisplay.SetFaction → Setup(hq, rightClickMenu).
+    // Resume() destroys the Leaderboard GameObject, so each pause/end-of-
+    // mission show creates a fresh one — Awake-as-Postfix runs every time.
+    [HarmonyPatch(typeof(Leaderboard), "Awake")]
+    static class Patch_Leaderboard_Awake
     {
-        // Game hotfixes occasionally rename or remove this method. If the
-        // target isn't there at load time, return false so Harmony skips
-        // this class silently instead of throwing — without this, the
-        // exception aborts PatchAll() and EVERY later patch in the mod
-        // (SpawnSceneObjects, ServerSetup, AddAirbase, etc.) fails to apply,
-        // which manifests as "Is Running false" + missing PMC at mission
-        // start.
+        // Skip the patch class entirely if the game ever renames Awake on
+        // Leaderboard. Without this, PatchAll() throws and aborts every
+        // patch declared after this one (the v1.6.2 fallout).
         static bool Prepare()
         {
-            return AccessTools.Method(typeof(Leaderboard), "OnEnable") != null;
+            return AccessTools.Method(typeof(Leaderboard), "Awake") != null;
         }
 
-        [HarmonyPrefix]
-        static bool Prefix(Leaderboard __instance)
+        [HarmonyPostfix]
+        static void Postfix(Leaderboard __instance)
         {
-            if (PmcFaction == null || PmcHQ == null) return true;
+            if (PmcFaction == null || PmcHQ == null) return;
 
             try
             {
                 var t = Traverse.Create(__instance);
                 var displays = (Array)t.Field("factionDisplays").GetValue();
-                var lobbyName = t.Field("lobbyName").GetValue<Text>();
-                var failPanel = t.Field("missionFailedPanel").GetValue<GameObject>();
-                var winPanel = t.Field("missionSucceededPanel").GetValue<GameObject>();
-                var resumeBtn = t.Field("resumeButton").GetValue<Button>();
-                var rect = t.Field("rectTransform").GetValue<RectTransform>();
+                var rightClick = t.Field("leaderBoardRightClick").GetValue();
+                if (displays == null) return;
 
-                DynamicMap.AllowedToOpen = false;
-                __instance.enabled = true;
+                var displayType = displays.GetType().GetElementType();
+                var hqProp = displayType.GetProperty("HQ", BindingFlags.Public | BindingFlags.Instance);
 
-                // PMC is not in HQLookup, so manually include it
-                var hqList = FactionRegistry.GetAllHQs().ToList();
-                if (!hqList.Contains(PmcHQ))
-                    hqList.Add(PmcHQ);
-                var allHQs = hqList.ToArray();
-
-                if (displays.Length < allHQs.Length)
+                // If PMC is already in there (paranoid guard), nothing to do.
+                for (int i = 0; i < displays.Length; i++)
                 {
-                    displays = ExpandLeaderboardDisplays(displays, allHQs.Length);
-                    t.Field("factionDisplays").SetValue(displays);
+                    var existing = displays.GetValue(i);
+                    if (existing == null) continue;
+                    if (hqProp?.GetValue(existing) is FactionHQ hq && hq == PmcHQ) return;
                 }
 
-                int count = Math.Min(allHQs.Length, displays.Length);
-                var setFaction = displays.GetType().GetElementType()
-                    .GetMethod("SetFaction", BindingFlags.Public | BindingFlags.Instance);
-
-                for (int i = 0; i < count; i++)
-                    setFaction.Invoke(displays.GetValue(i), new object[] { allHQs[i] });
-
-                if (GameManager.gameState == GameState.Multiplayer && SteamLobby.instance != null)
-                    lobbyName.text = SteamLobby.instance.CurrentLobbyName;
-
-                if (GameManager.gameState == GameState.SinglePlayer)
+                // Expand the array by one slot, clone the last display's UI.
+                var newDisplays = ExpandLeaderboardDisplays(displays, displays.Length + 1);
+                if (newDisplays == displays || newDisplays.Length <= displays.Length)
                 {
-                    resumeBtn.Select();
-                    Time.timeScale = 0f;
-                    AudioListener.pause = true;
-                    lobbyName.text = MissionManager.CurrentMission.Name;
+                    Log.LogWarning("Leaderboard expand returned no new slot — skipping PMC inject");
+                    return;
+                }
+                t.Field("factionDisplays").SetValue(newDisplays);
+
+                // Wire up the new slot to PMC HQ.
+                var setupMethod = displayType.GetMethod("Setup",
+                    BindingFlags.Public | BindingFlags.Instance,
+                    null,
+                    new[] { typeof(FactionHQ), rightClick?.GetType() ?? typeof(object) },
+                    null);
+                if (setupMethod == null)
+                {
+                    // Fall back to any Setup(FactionHQ, *) overload.
+                    foreach (var m in displayType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "Setup") continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length == 2 && ps[0].ParameterType == typeof(FactionHQ))
+                        {
+                            setupMethod = m;
+                            break;
+                        }
+                    }
+                }
+                if (setupMethod == null)
+                {
+                    Log.LogWarning("LeaderboardFactionDisplay.Setup(FactionHQ, *) not found — leaderboard PMC slot will be blank");
+                    return;
                 }
 
-                if (GameManager.gameResolution == GameResolution.Victory)
+                var newSlot = newDisplays.GetValue(newDisplays.Length - 1);
+                setupMethod.Invoke(newSlot, new object[] { PmcHQ, rightClick });
+
+                // Subscribe to PMC's onPlayerChangedFaction so the leaderboard
+                // refreshes when players join/leave PMC, matching what the
+                // original Awake does for BDF/PALA.
+                var onPlayersChanged = AccessTools.Method(typeof(Leaderboard), "OnPlayersChanged");
+                if (onPlayersChanged != null)
                 {
-                    winPanel.SetActive(true);
-                    failPanel.SetActive(false);
-                }
-                if (GameManager.gameResolution == GameResolution.Defeat)
-                {
-                    winPanel.SetActive(false);
-                    failPanel.SetActive(true);
+                    var del = (Action)Delegate.CreateDelegate(typeof(Action), __instance, onPlayersChanged);
+                    var addEvent = typeof(FactionHQ).GetEvent("onPlayerChangedFaction");
+                    addEvent?.AddEventHandler(PmcHQ, del);
                 }
 
-                LayoutRebuilder.ForceRebuildLayoutImmediate(rect);
-                return false;
+                Log.LogInfo($"Leaderboard PMC slot injected (total displays: {newDisplays.Length})");
             }
             catch (Exception ex)
             {
-                Log.LogError($"Leaderboard patch failed, running original: {ex}");
-                return true;
+                Log.LogError($"Leaderboard PMC inject failed: {ex}");
             }
         }
     }
